@@ -1,0 +1,19 @@
+[package]
+name = "horizon-web-relay"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pairs the browser build's players by a short code and carries their game between them over WebSockets"
+
+# Its own workspace: Koyeb (or any host) builds this folder alone.
+[workspace]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-tungstenite = "0.26"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
