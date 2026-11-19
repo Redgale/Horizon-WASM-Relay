@@ -10,6 +10,12 @@
 //!
 //! Up to `MAX_GUESTS` friends play in a world at once (4 players with the host). Listens on
 //! `$PORT` (8000 when unset), as Koyeb and most hosts set it; TLS is the host's (`wss://`).
+//!
+//! The same port also carries the chess lobby, on `GET /chess` (see `chess.rs`). It is a separate
+//! module with its own state; the three routes above work exactly as before. A plain (non
+//! WebSocket) `GET` answers `200 ok`, for hosts that health-check over HTTP.
+
+mod chess;
 
 use futures_util::{SinkExt, StreamExt};
 use std::{
@@ -59,6 +65,7 @@ struct Host {
 #[derive(Default)]
 struct Relay {
     hosts: Mutex<HashMap<String, Host>>,
+    lobby: Arc<chess::Lobby>,
 }
 
 /// A code as typed: case, spaces and dashes don't matter, O reads as 0, I and L as 1.
@@ -93,6 +100,7 @@ enum Route {
     Host,
     Join(String),
     Accept(String, u32),
+    Chess,
     Unknown,
 }
 
@@ -100,6 +108,7 @@ fn route(path: &str) -> Route {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     match parts.as_slice() {
         ["host"] => Route::Host,
+        ["chess"] => Route::Chess,
         ["join", code] => Route::Join(normalize_code(code)),
         ["accept", code, n] => match n.parse() {
             Ok(n) => Route::Accept(normalize_code(code), n),
@@ -111,12 +120,24 @@ fn route(path: &str) -> Route {
 
 // The handshake callback's error type is tungstenite's (`ErrorResponse`), not ours to shrink.
 #[allow(clippy::result_large_err)]
-async fn serve(relay: Arc<Relay>, stream: TcpStream) {
+async fn serve(relay: Arc<Relay>, mut stream: TcpStream) {
     let _ = stream.set_nodelay(true);
+    // A look at the request (nothing is consumed): chess sockets get a small message limit, and a
+    // plain HTTP request gets a plain answer. Anything else goes the way it always did.
+    let head = peek_head(&stream).await;
+    let mut chess_socket = false;
+    if let Some(head) = &head {
+        if is_plain_http(head) {
+            plain_answer(&mut stream).await;
+            return;
+        }
+        chess_socket = chess::wants_chess(head);
+    }
     let mut path = String::new();
+    let limit = if chess_socket { chess::MAX_MSG } else { 16 << 20 };
     let config = WebSocketConfig::default()
-        .max_message_size(Some(16 << 20))
-        .max_frame_size(Some(16 << 20));
+        .max_message_size(Some(limit))
+        .max_frame_size(Some(limit));
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         |request: &Request, response: Response| {
@@ -133,12 +154,52 @@ async fn serve(relay: Arc<Relay>, stream: TcpStream) {
         Route::Host => host(relay, ws).await,
         Route::Join(code) => join(relay, ws, code).await,
         Route::Accept(code, n) => accept(relay, ws, code, n),
+        Route::Chess => chess::handle(relay.lobby.clone(), ws).await,
         Route::Unknown => {
             let mut ws = ws;
             let _ = ws.send(json_error("unknown path")).await;
             let _ = ws.close(None).await;
         }
     }
+}
+
+/// The start of the request (up to its headers' end), read without taking it off the socket.
+async fn peek_head(stream: &TcpStream) -> Option<String> {
+    let mut buf = [0u8; 2048];
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_millis(200), stream.peek(&mut buf)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => return None,
+            Ok(Ok(n)) => {
+                if n == buf.len() || buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    return Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(_) => {}
+        }
+    }
+    None
+}
+
+/// A complete ordinary `GET` or `HEAD` (no WebSocket upgrade), e.g. a health check.
+fn is_plain_http(head: &str) -> bool {
+    let lower = head.to_ascii_lowercase();
+    lower.contains("\r\n\r\n")
+        && (lower.starts_with("get ") || lower.starts_with("head "))
+        && !lower.contains("upgrade: websocket")
+}
+
+async fn plain_answer(stream: &mut TcpStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut sink = [0u8; 2048];
+    let _ = stream.read(&mut sink).await;
+    let body = "horizon-web-relay ok\n";
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(reply.as_bytes()).await;
+    let _ = stream.shutdown().await;
 }
 
 /// A new code for a host, `None` when the relay has all the hosts it takes.
@@ -329,6 +390,9 @@ mod tests {
         assert_eq!(route("/join/k7q-2mx"), Route::Join("K7Q2MX".into()));
         assert_eq!(route("/accept/K7Q2MX/3"), Route::Accept("K7Q2MX".into(), 3));
         assert_eq!(route("/host"), Route::Host);
+        assert_eq!(route("/chess"), Route::Chess);
+        assert!(chess::wants_chess("GET /chess?x=1 HTTP/1.1\r\nHost: a\r\n\r\n"));
+        assert!(!chess::wants_chess("GET /host HTTP/1.1\r\n\r\n"));
         assert_eq!(route("/elsewhere"), Route::Unknown);
         let code = new_code();
         assert_eq!(code.len(), CODE_LEN);

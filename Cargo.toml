@@ -3,7 +3,7 @@ name = "horizon-web-relay"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Pairs the browser build's players by a short code and carries their game between them over WebSockets"
+description = "Pairs the browser build's players by a short code and carries their game between them over WebSockets; also the Blitz Chess online lobby at /chess"
 
 # Its own workspace: Koyeb (or any host) builds this folder alone.
 [workspace]
@@ -13,6 +13,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 tokio-tungstenite = "0.26"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 getrandom = "0.3"
+serde_json = "1"
 
 [profile.release]
 opt-level = 3
