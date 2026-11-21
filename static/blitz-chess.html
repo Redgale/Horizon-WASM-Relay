@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="bc-version" content="202611210023">
+<meta name="bc-version" content="202611210055">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Blitz Chess</title>
 <!--
@@ -82,8 +82,10 @@ main{flex:1;display:grid;grid-template-columns:330px minmax(0,1fr) 320px;gap:16p
 .clock.run{background:#e9ecf3;color:#12151c}.clock.low{background:var(--bad);color:#fff}
 /* material: the pieces a player is up (drawn in their owner's set) under the clock */
 .tcol{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:none}
-.mat{display:flex;align-items:center;justify-content:flex-end;height:20px;min-width:92px;font-size:12.5px;font-weight:750;color:var(--mut)}
-.mat .pc{position:relative;width:20px;height:20px;transition:none;margin-left:-7px}.mat .pc.g{margin-left:1px}
+.mat{display:flex;align-items:center;justify-content:flex-end;height:22px;min-width:92px;font-size:12.5px;font-weight:750;color:var(--mut)}
+.mat .pc{position:relative;width:22px;height:22px;transition:none;margin-left:-8px}.mat .pc.g{margin-left:2px}
+/* a light halo so dark pieces (any set) stand out on the dark card */
+.mat .pc svg{filter:drop-shadow(0 0 1px rgba(233,236,243,.95)) drop-shadow(0 0 2.5px rgba(233,236,243,.45))}
 .mat b{margin-left:5px;color:var(--text)}
 /* the side panel can be hidden to give the board more room */
 #btnSide{padding:6px 8px}
