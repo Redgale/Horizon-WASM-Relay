@@ -689,7 +689,7 @@ impl Lobby {
 
 /// Where copies from before versions existed are sent: a build that has the in-game updater, so every
 /// later update reaches them through the update screen.
-const LEGACY_UPDATE_URL: &str = "https://drive.google.com/uc?export=download&id=1oGPeaYksnyihz4Sv2hHqlfsi6YSMCIP4";
+const LEGACY_UPDATE_URL: &str = "https://drive.google.com/uc?export=download&id=1ne9HHeoi4waAP9Vg7mQofh7q5T5pOVyq";
 
 /// Why a client of this version can't come in, if it can't: `update` for an older version, `err` for one
 /// without a version.
