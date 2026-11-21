@@ -13,6 +13,11 @@
 //! - spectating: `spec` / `unspec`, answered by `snap`, then `sm` (a move), `sx` (game over)
 //! - `list` -> `glist`: the games that can be watched
 //!
+//! - version: `hi` carries the page's build version (`ver`). The relay embeds the latest page
+//!   (`static/blitz-chess.html`, served by a plain `GET /chess`); an older `ver` is answered with
+//!   `{"t":"update","ver":..,"url":..}` and a missing one (copies made before versions existed) with an
+//!   `err` saying where to get the new page. Either way the connection then ends.
+//!
 //! The relay never judges a game (it has no chess rules): the two players' pages do that, exactly as
 //! in a LAN game. It keeps the list of moves so that someone arriving late can catch up.
 
@@ -20,7 +25,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::{net::TcpStream, sync::mpsc};
@@ -41,6 +46,63 @@ const MAX_PER_SECOND: u32 = 60;
 
 type Ws = WebSocketStream<TcpStream>;
 type Tx = mpsc::UnboundedSender<Message>;
+
+/// The latest Blitz Chess page (copied here by the page's build), served at `GET /chess`.
+static PAGE: &[u8] = include_bytes!("../static/blitz-chess.html");
+
+/// The embedded page's build version, from its `<meta name="bc-version" content="N">` (0 if it has none).
+pub fn page_version() -> u64 {
+    static V: OnceLock<u64> = OnceLock::new();
+    *V.get_or_init(|| {
+        let head = String::from_utf8_lossy(&PAGE[..PAGE.len().min(4096)]);
+        head.split("name=\"bc-version\" content=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Where this relay's page is, as the client reached it: `https://<Host>/chess` (http for local addresses).
+pub fn page_url(head: &str) -> String {
+    let header = |name: &str| {
+        head.lines()
+            .skip(1)
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim().to_owned())
+    };
+    let Some(host) = header("host").filter(|h| !h.is_empty() && !h.contains(['/', ' ', '"', '<', '>'])) else {
+        return String::new();
+    };
+    let local = {
+        let h = host.trim_start_matches('[').split(']').next().unwrap_or("");
+        let h = h.split(':').next().unwrap_or("");
+        h == "localhost" || h.starts_with("127.") || h.starts_with("10.") || h.starts_with("192.168.") || h.is_empty()
+    };
+    let scheme = header("x-forwarded-proto")
+        .filter(|p| p == "http" || p == "https")
+        .unwrap_or_else(|| if local { "http".into() } else { "https".into() });
+    format!("{scheme}://{host}/chess")
+}
+
+/// A plain `GET /chess` (or `HEAD`): the latest page. Any origin may fetch it (a page opened from a file
+/// downloads its update this way).
+pub async fn serve_page(stream: &mut TcpStream, head: &str) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut sink = [0u8; 4096];
+    let _ = stream.read(&mut sink).await;
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: X-Blitz-Version\r\nX-Blitz-Version: {}\r\nConnection: close\r\n\r\n",
+        PAGE.len(),
+        page_version()
+    );
+    let _ = stream.write_all(reply.as_bytes()).await;
+    if !head.get(..5).is_some_and(|m| m.eq_ignore_ascii_case("head ")) {
+        let _ = stream.write_all(PAGE).await;
+    }
+    let _ = stream.shutdown().await;
+}
 
 /// Does this (peeked) HTTP request line + headers ask for the chess socket?
 pub fn wants_chess(head: &str) -> bool {
@@ -625,8 +687,27 @@ impl Lobby {
     }
 }
 
-/// One chess client, from its handshake until it goes.
-pub async fn handle(lobby: Arc<Lobby>, ws: Ws) {
+/// Where copies from before versions existed are sent: a build that has the in-game updater, so every
+/// later update reaches them through the update screen.
+const LEGACY_UPDATE_URL: &str = "https://drive.google.com/uc?export=download&id=1oGPeaYksnyihz4Sv2hHqlfsi6YSMCIP4";
+
+/// Why a client of this version can't come in, if it can't: `update` for an older version, `err` for one
+/// without a version.
+fn version_check(hello: &Value, page_url: &str) -> Option<Value> {
+    let want = page_version();
+    if want == 0 {
+        return None;
+    }
+    let have = hello.get("ver").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())));
+    match have {
+        None => Some(json!({"t": "err", "why": format!("This copy of Blitz Chess is out of date. Download the new version here: {LEGACY_UPDATE_URL} then open it (you can replace your old file). Later updates install from inside the game.")})),
+        Some(v) if v < want => Some(json!({"t": "update", "ver": want, "url": page_url})),
+        _ => None,
+    }
+}
+
+/// One chess client, from its handshake until it goes. `page_url` is where this relay's page is.
+pub async fn handle(lobby: Arc<Lobby>, ws: Ws, page_url: String) {
     let (mut sink, mut source) = ws.split();
     // The first message says who this is.
     let first = tokio::time::timeout(HELLO_WAIT, async {
@@ -645,6 +726,11 @@ pub async fn handle(lobby: Arc<Lobby>, ws: Ws) {
     let hello: Value = serde_json::from_str(&first).unwrap_or(Value::Null);
     if hello.get("t").and_then(Value::as_str) != Some("hi") {
         let _ = sink.send(Message::text("{\"t\":\"err\",\"why\":\"say hi first\"}")).await;
+        return;
+    }
+    if let Some(no) = version_check(&hello, &page_url) {
+        let _ = sink.send(Message::text(no.to_string())).await;
+        let _ = sink.close().await;
         return;
     }
     let (tx, mut outbox) = mpsc::unbounded_channel::<Message>();
@@ -709,7 +795,7 @@ mod tests {
 
     async fn client(at: std::net::SocketAddr, name: &str) -> (Client, Value) {
         let (mut ws, _) = connect_async(format!("ws://{at}/chess")).await.unwrap();
-        ws.send(Message::text(json!({"t": "hi", "name": name, "rating": 900, "level": 3, "hue": 120,
+        ws.send(Message::text(json!({"t": "hi", "name": name, "rating": 900, "level": 3, "hue": 120, "ver": page_version(),
             "eq": {"pieces": "classic", "acc": "", "fx": ""}}).to_string())).await.unwrap();
         let w = next_of(&mut ws, "welcome").await;
         (ws, w)
@@ -863,6 +949,50 @@ mod tests {
         drop(a);
         let _ = next_of(&mut b, "chc").await;
         assert_eq!(next_of(&mut b, "u-").await["id"], a_id);
+    }
+
+    #[tokio::test]
+    async fn old_versions_are_sent_to_the_update_and_the_page_is_served() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let at = start().await;
+        let want = page_version();
+        assert!(want > 0, "the embedded page has a version");
+        let hi = |ver: Value| json!({"t": "hi", "name": "Old", "ver": ver}).to_string();
+        // No version at all (copies from before versions): told where the new page is, as text.
+        let (mut ws, _) = connect_async(format!("ws://{at}/chess")).await.unwrap();
+        ws.send(Message::text(json!({"t": "hi", "name": "Old"}).to_string())).await.unwrap();
+        let m = next_of(&mut ws, "err").await;
+        assert!(m["why"].as_str().unwrap().contains(LEGACY_UPDATE_URL), "{m}");
+        // An older version: the update message.
+        let (mut ws, _) = connect_async(format!("ws://{at}/chess")).await.unwrap();
+        ws.send(Message::text(hi(json!(want - 1)))).await.unwrap();
+        let m = next_of(&mut ws, "update").await;
+        assert_eq!(m["ver"], want);
+        // The same version (or a newer one, as a string) comes in.
+        for v in [json!(want), json!((want + 1).to_string())] {
+            let (mut ws, _) = connect_async(format!("ws://{at}/chess")).await.unwrap();
+            ws.send(Message::text(hi(v))).await.unwrap();
+            let _ = next_of(&mut ws, "welcome").await;
+        }
+        // GET /chess is the page; HEAD has no body; GET / is still the health check.
+        let get = |req: &'static str| async move {
+            let mut s = TcpStream::connect(at).await.unwrap();
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut out = Vec::new();
+            s.read_to_end(&mut out).await.unwrap();
+            out
+        };
+        let page = get("GET /chess HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        let text = String::from_utf8_lossy(&page);
+        assert!(text.starts_with("HTTP/1.1 200") && text.contains("text/html") && text.contains("Access-Control-Allow-Origin: *"));
+        assert!(page.ends_with(PAGE));
+        let head = get("HEAD /chess HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        assert!(String::from_utf8_lossy(&head).ends_with("\r\n\r\n"));
+        let ok = get("GET / HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        assert!(String::from_utf8_lossy(&ok).ends_with("horizon-web-relay ok\n"));
+        assert_eq!(page_url("GET /chess HTTP/1.1\r\nHost: a.koyeb.app\r\n\r\n"), "https://a.koyeb.app/chess");
+        assert_eq!(page_url("GET /chess HTTP/1.1\r\nhost: 192.168.1.5:8000\r\n\r\n"), "http://192.168.1.5:8000/chess");
+        assert_eq!(page_url("GET /chess HTTP/1.1\r\nHost: a.b\r\nX-Forwarded-Proto: http\r\n\r\n"), "http://a.b/chess");
     }
 
     #[tokio::test]

@@ -128,11 +128,16 @@ async fn serve(relay: Arc<Relay>, mut stream: TcpStream) {
     let mut chess_socket = false;
     if let Some(head) = &head {
         if is_plain_http(head) {
-            plain_answer(&mut stream).await;
+            if chess::wants_chess(head) {
+                chess::serve_page(&mut stream, head).await;
+            } else {
+                plain_answer(&mut stream).await;
+            }
             return;
         }
         chess_socket = chess::wants_chess(head);
     }
+    let page_url = head.as_deref().map(chess::page_url).unwrap_or_default();
     let mut path = String::new();
     let limit = if chess_socket { chess::MAX_MSG } else { 16 << 20 };
     let config = WebSocketConfig::default()
@@ -154,7 +159,7 @@ async fn serve(relay: Arc<Relay>, mut stream: TcpStream) {
         Route::Host => host(relay, ws).await,
         Route::Join(code) => join(relay, ws, code).await,
         Route::Accept(code, n) => accept(relay, ws, code, n),
-        Route::Chess => chess::handle(relay.lobby.clone(), ws).await,
+        Route::Chess => chess::handle(relay.lobby.clone(), ws, page_url).await,
         Route::Unknown => {
             let mut ws = ws;
             let _ = ws.send(json_error("unknown path")).await;

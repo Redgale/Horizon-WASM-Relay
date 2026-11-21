@@ -23,10 +23,15 @@ exactly as before, and the chess side keeps its own state (`src/chess.rs`).
   game, 8 KB per message and 60 messages per second per connection.
 - A plain `GET /` (no WebSocket) answers `200 ok`, handy as an HTTP health check. TCP health checks
   keep working.
+- **It hosts the game**: a plain `GET /chess` serves the latest page (`static/blitz-chess.html`, embedded in
+  the binary at build time). Players can play straight from `https://<app>/chess`.
+- **Versions**: each page carries its build version, and the relay only lets in pages at least as new as
+  the one it hosts. An older page gets an update screen (download the new file in one click, or reload if
+  it is the hosted page); a copy from before versions existed is told, as text, where to get the new page.
+  To ship a new version: `node tools/build.mjs` (it copies the page here), then redeploy the relay.
 
-In the page: **Online** tab → relay address (`wss://<app>.koyeb.app`, or `ws://<this computer>:8000` on your
-own network) → **Go online**. You can also bake the address into the page (`DEFAULT_RELAY` near the top
-of its script).
+In the page: **Online** tab → **Go online**. The relay's address is baked into the page (`RELAY_URL` in
+`src/js/app.js`; `https://<app>.koyeb.app/` becomes `wss://<app>.koyeb.app/chess`).
 
 A game is lost if a player's connection drops (there is no reconnect): the other player is told and
 can claim the win.
