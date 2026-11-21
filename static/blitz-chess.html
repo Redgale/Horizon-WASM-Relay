@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="bc-version" content="202611202353">
+<meta name="bc-version" content="202611210023">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Blitz Chess</title>
 <!--
@@ -80,6 +80,20 @@ main{flex:1;display:grid;grid-template-columns:330px minmax(0,1fr) 320px;gap:16p
 .pcard .who{min-width:0;flex:1}
 .clock{font-variant-numeric:tabular-nums;font-weight:800;font-size:24px;background:#10131a;padding:6px 12px;border-radius:11px;min-width:92px;text-align:center;color:#9aa3b5;transition:background .2s,color .2s}
 .clock.run{background:#e9ecf3;color:#12151c}.clock.low{background:var(--bad);color:#fff}
+/* material: the pieces a player is up (drawn in their owner's set) under the clock */
+.tcol{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:none}
+.mat{display:flex;align-items:center;justify-content:flex-end;height:20px;min-width:92px;font-size:12.5px;font-weight:750;color:var(--mut)}
+.mat .pc{position:relative;width:20px;height:20px;transition:none;margin-left:-7px}.mat .pc.g{margin-left:1px}
+.mat b{margin-left:5px;color:var(--text)}
+/* the side panel can be hidden to give the board more room */
+#btnSide{padding:6px 8px}
+main.side-off{grid-template-columns:0 minmax(0,1fr) 320px}
+main.side-off #left{display:none}
+main.side-off #center{margin-left:-16px;grid-column:2}main.side-off #right{grid-column:3}
+#boardWrap{view-transition-name:board}#right{view-transition-name:rpanel}#left{view-transition-name:lpanel}
+::view-transition-group(*){animation-duration:.38s;animation-timing-function:cubic-bezier(.3,.7,.2,1)}
+::view-transition-old(lpanel){animation:.25s ease both lpanel-out}::view-transition-new(lpanel){animation:.3s ease both lpanel-in}
+@keyframes lpanel-out{to{opacity:0;transform:translateX(-40px)}}@keyframes lpanel-in{from{opacity:0;transform:translateX(-40px)}}
 .mvbox{flex:1;min-height:120px;display:flex;flex-direction:column;overflow:hidden}
 .mvhead{padding:10px 14px;font-weight:700;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
 .mvlist{overflow:auto;padding:8px 10px;display:grid;grid-template-columns:34px 1fr 1fr;gap:2px 4px;font-variant-numeric:tabular-nums;align-content:start;flex:1}
@@ -173,8 +187,14 @@ input[type=range]{width:100%;accent-color:var(--acc)}
  #center{order:1;position:static}#right{order:2;position:static;max-height:none}
  #boardWrap{width:min(100%,calc(100vh - 140px))}
 }
+@media (max-width:1180px){
+ main.side-off{grid-template-columns:minmax(0,1fr)}
+ main.side-off #center{margin-left:0;grid-column:1}main.side-off #right{grid-column:1}
+ main.side-off #boardWrap{width:min(100%,calc(100vh - 96px))}
+}
 @media (max-width:760px){
  main{grid-template-columns:minmax(0,1fr);padding:10px;gap:10px}
+ main.side-off #boardWrap{width:100%}
  #boardWrap{width:100%}
  .daily{grid-template-columns:repeat(2,1fr)}.crates{grid-template-columns:repeat(2,1fr)}
  .brand{width:100%}
@@ -197,6 +217,7 @@ a.btn{text-decoration:none}
 <svg id="defs" aria-hidden="true"><defs id="svgdefs"></defs></svg>
 <div id="app">
   <header id="top">
+    <button class="btn sm ghost" id="btnSide" data-act="side" aria-label="Hide the side panel" title="Hide / show the side panel"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
     <div class="brand"><svg viewBox="0 0 100 100" width="28" height="28"><use href="#s-n" fill="#4f90ff" stroke="#4f90ff" stroke-width="6" stroke-linejoin="round"/></svg><span>Blitz<b>Chess</b></span></div>
     <div class="pill" title="Tokens"><svg class="coin" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9.2" fill="#e8920c"/><circle cx="10" cy="10" r="7.3" fill="#ffc83d"/><path d="M6.2 7.2A5 5 0 0 1 11 5.2" stroke="#fff3b0" stroke-width="1.6" fill="none" stroke-linecap="round"/><circle cx="10" cy="10" r="3" fill="#f0a500"/></svg><span id="tok">0</span></div>
     <div class="lvl" title="Level"><span>Lv <b id="lv">1</b></span><div class="xpbar"><i id="xpf"></i></div></div>
@@ -620,6 +641,8 @@ const Store = {
     return this.attachDir(h);
   },
   async attachDir(h) {
+    // a page opened from a file must live in its save folder (that is how it updates itself)
+    if (!(await this.pageInFolder(h))) { this.pendingDir = h; return { state: 'outside', name: h.name }; }
     this.dir = h; this.folderName = h.name;
     try { await idbSet('dir', h); } catch (e) {}
     return this._load();
@@ -642,6 +665,7 @@ const Store = {
     catch (e) { if (e && e.name === 'NotFoundError') return null; throw e; }
   },
   async _load() {
+    if (!(await this.pageInFolder(this.dir))) { this.mode = 'none'; this.pendingDir = this.dir; return { state: 'outside', name: this.dir.name }; }
     this.mode = 'folder';
     const main = await this._readFile(FN), bak = await this._readFile(BK);
     return this._loadBytes(main, bak);
@@ -680,6 +704,39 @@ const Store = {
     this.busy = false;
   },
   async exportBytes(data) { return seal(data); },
+  /* ---- the page itself in the save folder (pages opened from a file only) ---- */
+  PAGE: 'blitz-chess.html',
+  pendingDir: null,
+  needsPageInFolder() { return location.protocol === 'file:'; },
+  pageName() { try { return decodeURIComponent(location.pathname.split('/').pop() || ''); } catch (e) { return ''; } },
+  /** is the running page in this folder? (same file name, same version) */
+  async pageInFolder(dir) {
+    if (!this.needsPageInFolder()) return true;
+    const name = this.pageName(), mine = document.querySelector('meta[name="bc-version"]');
+    if (!name || !mine || !dir) return false;
+    try {
+      const head = await (await (await dir.getFileHandle(name)).getFile()).slice(0, 4096).text();
+      const m = /name="bc-version" content="(\d+)"/.exec(head);
+      return !!m && m[1] === mine.content;
+    } catch (e) { return false; }
+  },
+  /** write a page into the folder as blitz-chess.html; returns the folder it went to */
+  async installPage(bytes, dir) {
+    const fresh = !dir; dir = dir || this.pendingDir || this.dir;
+    const fh = await dir.getFileHandle(this.PAGE, { create: true });
+    const w = await fh.createWritable(); await w.write(bytes); await w.close();
+    if (fresh) { try { await idbSet('dir', dir); } catch (e) {} } // the copy opened from there finds its folder
+    return dir;
+  },
+  /** replace the running page (in the save folder) with a new version; returns the new file's name */
+  async replacePage(bytes) {
+    const old = this.pageName();
+    await this.installPage(bytes, this.dir);
+    if (old && old !== this.PAGE) { try { await this.dir.removeEntry(old); } catch (e) {} }
+    return this.PAGE;
+  },
+  /** resolves once nothing is waiting to be saved */
+  async idle() { for (let i = 0; i < 100 && (this.busy || this.pending); i++) await new Promise(r => setTimeout(r, 50)); },
   async importBytes(bytes) { return open(bytes); },
 };
 root.BCSave = Store;
@@ -1196,7 +1253,7 @@ function newProfile(name) {
     inv: { boards: ['harbor', 'brown'], bgs: ['midnight'], pieces: ['classic'], acc: [], fx: [] },
     eq: { boards: 'harbor', bgs: 'midnight', pieces: 'classic', acc: '', fx: '' },
     shop: { day: '', bought: [] }, hist: [], daily: '',
-    set: { sound: true, legal: true, premove: true, autoq: false, coords: true, autoflip: false, f2f: false },
+    set: { sound: true, legal: true, premove: true, autoq: false, coords: true, autoflip: false, f2f: false, hideSide: false },
   };
 }
 function normalize(d) {
@@ -1680,7 +1737,7 @@ const Game = {
   redrawPos() {
     if (!G) return;
     const s = G.snaps[G.view >= 0 ? G.view : G.snaps.length - 1];
-    Board.setPosition(s.b, s.lm, s.ck);
+    Board.setPosition(s.b, s.lm, s.ck); UIr.material();
     if (G.view < 0 && G.pre) Board.setPre(G.pre);
   },
   /* --- banner on the board --- */
@@ -1812,7 +1869,10 @@ const Online = {
       ON.inCh = []; ON.out = null; ON.match = null; ON.spec = null; ON.specN = 0;
       clearInterval(onPollT); onPollT = setInterval(() => { if (ON.st === 'on') Relay.send({ t: 'list' }); }, 6000);
       toast('You are online as ' + ON.me.name);
-    } catch (e) { ON.st = 'off'; ON.err = e.message || String(e); if (e.update) showUpdate(e.update); }
+    } catch (e) {
+      ON.st = 'off'; ON.err = e.message || String(e);
+      if (e.update) { if (await canSelfUpdate()) selfUpdate(e.update); else showUpdate(e.update); }
+    }
     UIr.left();
   },
   /* the user chose to go offline */
@@ -1929,6 +1989,28 @@ Relay.onmsg = m => Online.onmsg(m);
 Relay.onclose = () => Online.dropped();
 
 /* ---------- updates: the relay hosts the latest page and refuses older ones ---------- */
+/** the latest page from the relay, checked to be a complete build */
+async function fetchLatestPage() {
+  const r = await fetch(Relay.pageUrl(RELAY_URL), { cache: 'no-store' });
+  if (!r.ok) throw new Error('the relay answered ' + r.status);
+  const bytes = new Uint8Array(await r.arrayBuffer()), td = new TextDecoder();
+  const m = /name="bc-version" content="(\d+)"/.exec(td.decode(bytes.subarray(0, 4096)));
+  if (!m || !/<\/html>\s*$/.test(td.decode(bytes.subarray(Math.max(0, bytes.length - 64))))) throw new Error('the download was incomplete');
+  bytes.version = +m[1];
+  return bytes;
+}
+/* a page opened from the save folder updates itself: new file in, old one out, reload */
+const Updater = { go(name) { if (name === BCSave.pageName()) location.reload(); else location.replace(new URL(encodeURIComponent(name), location.href).href); } };
+async function canSelfUpdate() { return BCSave.mode === 'folder' && BCSave.needsPageInFolder() && await BCSave.pageInFolder(BCSave.dir); }
+async function selfUpdate(u) {
+  const mb = modal(`<div class="mc" style="text-align:center"><h2 class="t">Updating…</h2><p class="note">Installing the new version (${esc(String(u.ver || ''))}) in your save folder. The game reloads by itself.</p></div>`, { locked: true, cls: 'sm' });
+  try {
+    const bytes = await fetchLatestPage();
+    if (bytes.version <= appVersion()) throw new Error('the relay has no newer version');
+    flushDirty(); await BCSave.idle();
+    Updater.go(await BCSave.replacePage(bytes));
+  } catch (e) { mb.locked = false; mb.close(); showUpdate(u); toast('Automatic update failed: ' + (e.message || e), 5000); }
+}
 function showUpdate(u) {
   const url = Relay.pageUrl(RELAY_URL), hosted = location.href.split(/[?#]/)[0] === url;
   modal(mhead('', 'Update available') + `<div class="mc"><p class="note">A new version of Blitz Chess is out, and online play needs it.</p>
@@ -2077,12 +2159,32 @@ const UIr = {
     const bc = Board.flip ? 'b' : 'w', tcn = other(bc);
     const fill = (sel, c) => {
       const info = G ? G.pl[c] : (c === bc ? myInfo() : null), el = $(sel);
-      const clk = `<div class="clock" data-c="${c}">0:00</div>`;
+      const clk = `<div class="tcol"><div class="clock" data-c="${c}">0:00</div><div class="mat" data-c="${c}"></div></div>`;
       if (!info) { el.innerHTML = `<div class="av" style="background:#2b3142">?</div><div class="who"><div class="nm">Opponent</div><div class="sub">—</div></div>${clk}`; return; }
       const sub = info.bot ? `Bot · ${info.rating >= 3200 ? 'Max' : info.rating}` : info.local ? (c === 'w' ? 'Plays white' : 'Plays black') : `${info.rating} · Level ${info.level}`;
       el.innerHTML = `${avatar(info.name, info.hue)}<div class="who"><div class="nm">${esc(info.name)}</div><div class="sub">${esc(sub)}</div></div>${clk}`;
     };
-    fill('#cardTop', tcn); fill('#cardBot', bc); this.clocks();
+    fill('#cardTop', tcn); fill('#cardBot', bc); this.clocks(); this.material();
+  },
+  /* under each clock: what that player is up (net captures, shown in the opponent's pieces) and by how much */
+  material() {
+    const els = $$('.mat'); if (!els.length) return;
+    const b = G ? (G.view >= 0 ? G.snaps[G.view].b : G.game.b) : null, n = { w: {}, b: {} };
+    if (b) for (const p of b) if (p) { const c = Chess.isW(p) ? 'w' : 'b', t = p.toLowerCase(); n[c][t] = (n[c][t] || 0) + 1; }
+    const VAL = { q: 9, r: 5, b: 3, n: 3, p: 1 };
+    let score = 0; for (const t in VAL) score += VAL[t] * ((n.w[t] || 0) - (n.b[t] || 0));
+    for (const el of els) {
+      const c = el.dataset.c, o = other(c); let h = '';
+      if (b) {
+        const set = Board.ownerEq(o).pieces;
+        for (const t of 'qrbnp') {
+          const d = (n[c][t] || 0) - (n[o][t] || 0);
+          for (let i = 0; i < d; i++) h += `<span class="pc set-${esc(set)} ${o}${i ? '' : ' g'}">${Art.pieceSVG(o === 'w' ? t.toUpperCase() : t)}</span>`;
+        }
+        const mine = c === 'w' ? score : -score; if (mine > 0) h += `<b>+${mine}</b>`;
+      }
+      el.innerHTML = h;
+    }
   },
   clocks() {
     if (!D) return;
@@ -2258,6 +2360,8 @@ function openSettings() {
 function welcomeHTML(kind, extra) {
   extra = extra || {};
   if (kind === 'perm') return `<div class="mc" style="text-align:center"><h2 class="t">Welcome back</h2><p class="note">Chrome needs your OK again to use your save folder <b>${esc(extra.name)}</b>.</p><button class="btn primary wide" data-act="reconnect">Reconnect to “${esc(extra.name)}”</button><div class="gap"></div><button class="btn wide" data-act="pickFolder">Use a different folder…</button><div class="gap"></div><button class="btn ghost wide sm" data-act="useLocal">Use browser storage instead</button></div>`;
+  if (kind === 'outside') return `<div class="mc" style="text-align:center"><h2 class="t">Keep the game in your save folder</h2><p class="note">To save into <b>${esc(extra.name)}</b>, this game file (<b>blitz-chess.html</b>) has to be inside that folder and opened from there. That is how it updates itself.</p><p class="note">Move this file into <b>${esc(extra.name)}</b> and open it from there, or put the latest version of the game in the folder now:</p><button class="btn primary wide" data-act="installHere">Put the game in “${esc(extra.name)}”</button><div class="gap"></div><button class="btn wide" data-act="pickFolder">Choose a different folder…</button><div class="gap"></div><button class="btn ghost wide sm" data-act="useLocal">Use browser storage instead</button></div>`;
+  if (kind === 'installed') return `<div class="mc" style="text-align:center"><h2 class="t">Done</h2><p class="note">The game is now in <b>${esc(extra.name)}</b>. Close this tab and open <b>blitz-chess.html</b> from that folder: your progress will be saved there.</p><button class="btn ghost wide sm" data-act="useLocal">Use browser storage instead</button></div>`;
   if (kind === 'bad') return `<div class="mc" style="text-align:center"><h2 class="t">Save file problem</h2><p class="note">The save file in this folder was <b>modified or damaged</b> and no valid backup was found.</p><button class="btn bad wide" data-act="startFresh">Start a new profile (the bad file is kept aside)</button><div class="gap"></div><button class="btn wide" data-act="pickFolder">Choose a different folder…</button></div>`;
   return `<div class="mc"><h2 class="t">♞ Blitz Chess</h2><p class="note">Bullet, blitz and rapid chess with Stockfish bots, an online lobby, and a cosmetics shop. Pick a folder where your progress is saved — the file inside is encrypted so it can’t be hand-edited.</p>
     <label class="note">Your name</label><input type="text" id="wName" maxlength="16" value="Player"><div class="gap"></div>
@@ -2277,9 +2381,20 @@ function afterLoad(r, name) {
   else if (r.state === 'empty') { D = newProfile(name || wName()); persist(true); closeWelcome(); startApp(); }
   else if (r.state === 'bad') showWelcome('bad');
   else if (r.state === 'perm') showWelcome('perm', { name: r.name });
+  else if (r.state === 'outside') showWelcome('outside', { name: r.name });
   else showWelcome('new');
 }
 let started = false;
+/* hide / show the side panel (animated where the browser can morph the layout) */
+function setSide(hide, animate) {
+  D.set.hideSide = !!hide;
+  const go = () => {
+    $('main').classList.toggle('side-off', !!hide);
+    const b = $('#btnSide'); b.setAttribute('aria-label', hide ? 'Show the side panel' : 'Hide the side panel'); b.classList.toggle('on', !!hide);
+  };
+  if (animate && document.startViewTransition && !matchMedia('(prefers-reduced-motion: reduce)').matches) document.startViewTransition(go);
+  else go();
+}
 function startApp() {
   if (!started) {
     started = true; wireNet();
@@ -2287,6 +2402,7 @@ function startApp() {
     setTimeout(() => Engine.init().then(() => UIr.left()).catch(() => UIr.left()), 600);
   }
   $('#bgfx').className = 'bg-' + D.eq.bgs;
+  setSide(D.set.hideSide);
   Board.resize(); Game.reset();
   UIr.saveInd();
 }
@@ -2317,6 +2433,7 @@ async function act(a, t, e) {
     case 'tc': UI.tc = TCS[+t.dataset.i].slice(); UIr.left(); UIr.clocks(); break;
     case 'toggleSet': D.set[t.dataset.k] = !D.set[t.dataset.k]; persist(); Board.applyView(); UIr.left(); UIr.controls(); break;
     case 'rotate': Board.rotate(); break;
+    case 'side': setSide(!D.set.hideSide, true); persist(); break;
     case 'color': UI.color = t.dataset.v; UIr.left(); break;
     case 'bot': UI.bot = +t.dataset.i; UIr.left(); break;
     case 'playBot': UI.tab = 'new'; Game.startBot(UI.bot, UI.color, UI.tc.slice()); break;
@@ -2377,10 +2494,17 @@ async function act(a, t, e) {
     }
     case 'reconnect': { try { afterLoad(await BCSave.reconnect()); } catch (er) { toast(er.message || 'Permission denied'); } break; }
     case 'useLocal': afterLoad(await BCSave.loadLocal()); break;
+    case 'installHere': {
+      t.disabled = true; t.textContent = 'Downloading the game…';
+      try { const dir = await BCSave.installPage(await fetchLatestPage()); showWelcome('installed', { name: dir.name }); }
+      catch (er) { t.disabled = false; t.textContent = 'Try again'; toast('Could not put the game there: ' + (er.message || er), 5000); }
+      break;
+    }
     case 'startFresh': { await BCSave.quarantineBad(); afterLoad({ state: 'empty' }); break; }
     case 'changeFolder': {
       try {
         const r = await BCSave.chooseFolder();
+        if (r.state === 'outside') { toast(`Put blitz-chess.html in “${r.name}” and open it from there to save in that folder`, 6000); break; }
         if (r.state === 'ready') {
           if (confirm('That folder already contains a save.\n\nOK = load it (replaces current progress)\nCancel = overwrite it with your current progress')) { D = normalize(r.data); applyEquip(); UIr.all(); }
         }
